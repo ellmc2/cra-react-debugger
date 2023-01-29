@@ -10,5 +10,6 @@ npx create-react-app cra-debugger
 # 2、使用cra提供的自定义配置
 npm run eject
 # 3、拉取v18.2.0 tag 的react
-cd src && git clone --branch v18.2.0 https://github.com/facebook/react.git
+cd src && git submodule add https://github.com/facebook/react.git && git checkout -b v18.2.0 v18.2.0
 ```
+
