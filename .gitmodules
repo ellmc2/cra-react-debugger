@@ -1,3 +1,0 @@
-[submodule "src/react"]
-	path = src/react
-	url = https://github.com/facebook/react.git
