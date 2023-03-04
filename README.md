@@ -1569,6 +1569,185 @@ if (isArray(newChild)) {
 
 这一节我们来看看，如何处理同级多个节点的 `Diff`。
 
+##### 4.3.1 概览
+
+首先归纳下我们需要处理的情况：
+
+我们以**之前**代表更新前的 `JSX对象`，**之后**代表更新后的 `JSX对象`。
+
+###### 4.3.1.1 节点更新
+
+```js
+// 之前
+<ul>
+  <li key="0" className="before">0<li>
+  <li key="1">1<li>
+</ul>
+
+// 之后 情况1 —— 节点属性变化
+<ul>
+  <li key="0" className="after">0<li>
+  <li key="1">1<li>
+</ul>
+
+// 之后 情况2 —— 节点类型更新
+<ul>
+  <div key="0">0</div>
+  <li key="1">1<li>
+</ul>
+
+```
+
+###### 4.3.1.2 节点新增或者减少
+
+```js
+// 之前
+<ul>
+  <li key="0">0<li>
+  <li key="1">1<li>
+</ul>
+
+// 之后 情况1 —— 新增节点
+<ul>
+  <li key="0">0<li>
+  <li key="1">1<li>
+  <li key="2">2<li>
+</ul>
+
+// 之后 情况2 —— 删除节点
+<ul>
+  <li key="1">1<li>
+</ul>
+
+```
+
+###### 4.3.1.3 节点位置变化
+
+```js
+// 之前
+<ul>
+  <li key="0">0<li>
+  <li key="1">1<li>
+</ul>
+
+// 之后
+<ul>
+  <li key="1">1<li>
+  <li key="0">0<li>
+</ul>
+```
+
+同级多个节点的 `Diff`，一定属于以上三种情况中的一种或多种。
+
+##### 4.3.2 `Diff` 的思路
+
+该如何设计算法呢？如果让我设计一个 `Diff算法`，我首先想到的方案是：
+
+1. 判断当前节点的更新属于哪种情况
+2. 如果是 `新增`，执行新增逻辑
+3. 如果是 `删除`，执行删除逻辑
+4. 如果是 `更新`，执行更新逻辑
+
+按这个方案，其实有个隐含的前提——**不同操作的优先级是相同的**
+
+但是 `React团队` 发现，在日常开发中，相较于 `新增` 和 `删除`，`更新` 组件发生的频率更高。所以 `Diff` 会优先判断当前节点是否属于 `更新`。
+
+> 注意
+>
+> 在我们做数组相关的算法题时，经常使用**双指针**从数组头和尾同时遍历以提高效率，但是这里却不行。
+>
+> 虽然本次更新的 `JSX对象`、`newChildren` 为数组形式，但是和 `newChildren` 中每个组件进行比较的是 `current fiber`，同级的 `Fiber节点` 是由 `sibling` 指针链接形成的单链表，即不支持双指针遍历。
+>
+> 即  `newChildren[0]` 与 `fiber` 比较，`newChildren[1]` 与 `fiber.sibling` 比较。
+>
+> 所以无法使用**双指针**优化。
+
+基于以上原因，`Diff算法 `的整体逻辑会经历两轮遍历：
+
+第一轮遍历：处理 `更新` 的节点。
+
+第二轮遍历：处理剩下的不属于 `更新` 的节点。
+
+##### 4.3.3 第一轮遍历
+
+第一轮遍历步骤如下：
+
+1. `let i = 0`，遍历 `newChildren`，将 `newChildren[i]` 与 `oldFiber` 比较，判断 `DOM节点` 是否可复用。
+2. 如果可复用，`i++`，继续比较 `newChildren[i]` 与 `oldFiber.sibling`，可以复用则继续遍历。
+3. 如果不可复用，分两种情况：
+
+- `key` 不同导致不可复用，立即跳出整个遍历，**第一轮遍历结束。**
+- `key `相同 `type` 不同导致不可复用，会将 `oldFiber` 标记为 `DELETION`，并继续遍历
+
+4. 如果 `newChildren` 遍历完（即 `i === newChildren.length - 1`）或者 `oldFiber` 遍历完（即 `oldFiber.sibling === null` ），跳出遍历，**第一轮遍历结束。**
+
+> 你可以从[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactChildFiber.new.js#L818)看到这轮遍历的源码
+
+当遍历结束后，会有两种结果：
+
+步骤3跳出的遍历：
+
+此时 `newChildren` 没有遍历完，`oldFiber` 也没有遍历完。
+
+举个例子，考虑如下代码：
+
+```js
+// 之前
+<li key="0">0</li>
+<li key="1">1</li>
+<li key="2">2</li>
+            
+// 之后
+<li key="0">0</li>
+<li key="2">1</li>
+<li key="1">2</li>
+```
+
+第一个节点可复用，遍历到 `key === 2` 的节点发现 `key` 改变，不可复用，跳出遍历，等待第二轮遍历处理。
+
+此时 `oldFiber` 剩下 `key === 1`、`key === 2` 未遍历，`newChildren` 剩下 `key === 2`、`key === 1 `未遍历。
+
+步骤4跳出的遍历
+
+可能 `newChildren` 遍历完，或 `oldFiber` 遍历完，或他们同时遍历完。
+
+举个例子，考虑如下代码：
+
+```js
+// 之前
+<li key="0" className="a">0</li>
+<li key="1" className="b">1</li>
+            
+// 之后 情况1 —— newChildren与oldFiber都遍历完
+<li key="0" className="aa">0</li>
+<li key="1" className="bb">1</li>
+            
+// 之后 情况2 —— newChildren没遍历完，oldFiber遍历完
+// newChildren剩下 key==="2" 未遍历
+<li key="0" className="aa">0</li>
+<li key="1" className="bb">1</li>
+<li key="2" className="cc">2</li>
+            
+// 之后 情况3 —— newChildren遍历完，oldFiber没遍历完
+// oldFiber剩下 key==="1" 未遍历
+<li key="0" className="aa">0</li>
+
+```
+
+
+
+
+
+##### 4.3.4 第二轮遍历
+
+##### 4.3.5 处理移动的节点
+
+##### 4.3.6 标记节点是否移动
+
+
+
+
+
 ## 参考
 
 1. [React 技术揭秘](https://react.iamkasong.com/)
