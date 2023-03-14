@@ -1658,7 +1658,7 @@ if (isArray(newChild)) {
 >
 > 虽然本次更新的 `JSX对象`、`newChildren` 为数组形式，但是和 `newChildren` 中每个组件进行比较的是 `current fiber`，同级的 `Fiber节点` 是由 `sibling` 指针链接形成的单链表，即不支持双指针遍历。
 >
-> 即  `newChildren[0]` 与 `fiber` 比较，`newChildren[1]` 与 `fiber.sibling` 比较。
+> 即 `newChildren[0]` 与 `fiber` 比较，`newChildren[1]` 与 `fiber.sibling` 比较。
 >
 > 所以无法使用**双指针**优化。
 
@@ -1685,7 +1685,7 @@ if (isArray(newChild)) {
 
 当遍历结束后，会有两种结果：
 
-步骤3跳出的遍历：
+步骤 3 跳出的遍历：
 
 此时 `newChildren` 没有遍历完，`oldFiber` 也没有遍历完。
 
@@ -1696,7 +1696,7 @@ if (isArray(newChild)) {
 <li key="0">0</li>
 <li key="1">1</li>
 <li key="2">2</li>
-            
+
 // 之后
 <li key="0">0</li>
 <li key="2">1</li>
@@ -1707,7 +1707,7 @@ if (isArray(newChild)) {
 
 此时 `oldFiber` 剩下 `key === 1`、`key === 2` 未遍历，`newChildren` 剩下 `key === 2`、`key === 1 `未遍历。
 
-步骤4跳出的遍历
+步骤 4 跳出的遍历
 
 可能 `newChildren` 遍历完，或 `oldFiber` 遍历完，或他们同时遍历完。
 
@@ -1717,36 +1717,478 @@ if (isArray(newChild)) {
 // 之前
 <li key="0" className="a">0</li>
 <li key="1" className="b">1</li>
-            
+
 // 之后 情况1 —— newChildren与oldFiber都遍历完
 <li key="0" className="aa">0</li>
 <li key="1" className="bb">1</li>
-            
+
 // 之后 情况2 —— newChildren没遍历完，oldFiber遍历完
 // newChildren剩下 key==="2" 未遍历
 <li key="0" className="aa">0</li>
 <li key="1" className="bb">1</li>
 <li key="2" className="cc">2</li>
-            
+
 // 之后 情况3 —— newChildren遍历完，oldFiber没遍历完
 // oldFiber剩下 key==="1" 未遍历
 <li key="0" className="aa">0</li>
 
 ```
 
-
-
-
-
 ##### 4.3.4 第二轮遍历
+
+对于第一轮遍历的结果，我们分别讨论：
+
+`newChildren` 与 `oldFiber` 同时遍历完；
+
+那就是最理想的情况：只需在第一轮遍历进行组件[`更新` (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactChildFiber.new.js#L825)。此时 `Diff` 结束。
+
+`newChildren` 没遍历完，`oldFiber `遍历完；
+
+已有的 `DOM节点` 都复用了，这时还有新加入的节点，意味着本次更新有新节点插入，我们只需要遍历剩下的 `newChildren` 为生成的 `workInProgress fiber` 依次标记 `Placement`。
+
+> 你可以在[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactChildFiber.new.js#L869)看到这段源码逻辑
+
+`newChildren` 遍历完，`oldFiber ` 没遍历完；
+
+`newChildren` 遍历完，`oldFiber` 没遍历完。意味着本次更新比之前的节点数量少，有节点被删除了。所以需要遍历剩下的 `oldFiber`，依次标记 `Deletion`。
+
+> 你可以在[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactChildFiber.new.js#L863)看到这段源码逻辑
+
+`newChildren` 与 `oldFiber` 都没遍历完；
+
+这意味着有节点在这次更新中改变了位置。
+
+这是 `Diff算法` 最精髓也是最难懂的部分。我们接下来会重点讲解。
+
+> 你可以在[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactChildFiber.new.js#L893)看到这段源码逻辑
 
 ##### 4.3.5 处理移动的节点
 
+由于有节点改变了位置，所以不能再用位置索引`i`对比前后的节点，那么如何才能将同一个节点在两次更新中对应上呢？
+
+我们需要使用 `key`。
+
+为了快速的找到 `key` 对应的 `oldFiber`，我们将所有还未处理的 `oldFiber` 存入以 `key` 为 key，`oldFiber` 为 value 的 `Map`中。
+
+```javascript
+const existingChildren = mapRemainingChildren(returnFiber, oldFiber);
+```
+
+> 你可以在[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactChildFiber.new.js#L890)看到这段源码逻辑
+
+接下来遍历剩余的 `newChildren`，通过 `newChildren[i].key` 就能在 `existingChildren` 中找到 `key` 相同的 `oldFiber`。
+
 ##### 4.3.6 标记节点是否移动
 
+既然我们的目标是寻找移动的节点，那么我们需要明确：节点是否移动是以什么为参照物？
 
+我们的参照物是：最后一个可复用的节点在 `oldFiber` 中的位置索引（用变量 `lastPlacedIndex` 表示）。
 
+由于本次更新中节点是按 `newChildren` 的顺序排列。在遍历 `newChildren` 过程中，每个 `遍历到的可复用节点` 一定是当前遍历到的 `所有可复用节点` 中**最靠右的那个**，即一定在 `lastPlacedIndex` 对应的 `可复用的节点` 在本次更新中位置的后面。
 
+那么我们只需要比较 `遍历到的可复用节点` 在上次更新时是否也在 `lastPlacedIndex` 对应的 `oldFiber` 后面，就能知道两次更新中这两个节点的相对位置改变没有。
+
+我们用变量 `oldIndex` 表示 `遍历到的可复用节点` 在 `oldFiber` 中的位置索引。如果 `oldIndex < lastPlacedIndex`，代表本次更新该节点需要向右移动。
+
+`lastPlacedIndex` 初始为 `0`，每遍历一个可复用的节点，如果 `oldIndex >= lastPlacedIndex`，则 `lastPlacedIndex = oldIndex`。
+
+单纯文字表达比较晦涩，这里我们提供两个 Demo，你可以对照着理解。
+
+Demo1
+
+在 Demo 中我们简化下书写，每个字母代表一个节点，字母的值代表节点的 `key`
+
+```markdown
+// 之前
+abcd
+
+// 之后
+acdb
+
+===第一轮遍历开始===
+a（之后）vs a（之前）  
+key 不变，可复用
+此时 a 对应的 oldFiber（之前的 a）在之前的数组（abcd）中索引为 0
+所以 lastPlacedIndex = 0;
+
+继续第一轮遍历...
+
+c（之后）vs b（之前）  
+key 改变，不能复用，跳出第一轮遍历
+此时 lastPlacedIndex === 0;
+===第一轮遍历结束===
+
+===第二轮遍历开始===
+newChildren === cdb，没用完，不需要执行删除旧节点
+oldFiber === bcd，没用完，不需要执行插入新节点
+
+将剩余 oldFiber（bcd）保存为 map
+
+// 当前 oldFiber：bcd
+// 当前 newChildren：cdb
+
+继续遍历剩余 newChildren
+
+key === c 在 oldFiber 中存在
+const oldIndex = c（之前）.index;
+此时 oldIndex === 2; // 之前节点为 abcd，所以 c.index === 2
+比较 oldIndex 与 lastPlacedIndex;
+
+如果 oldIndex >= lastPlacedIndex 代表该可复用节点不需要移动
+并将 lastPlacedIndex = oldIndex;
+如果 oldIndex < lastplacedIndex 该可复用节点之前插入的位置索引小于这次更新需要插入的位置索引，代表该节点需要向右移动
+
+在例子中，oldIndex 2 > lastPlacedIndex 0，
+则 lastPlacedIndex = 2;
+c 节点位置不变
+
+继续遍历剩余 newChildren
+
+// 当前 oldFiber：bd
+// 当前 newChildren：db
+
+key === d 在 oldFiber 中存在
+const oldIndex = d（之前）.index;
+oldIndex 3 > lastPlacedIndex 2 // 之前节点为 abcd，所以 d.index === 3
+则 lastPlacedIndex = 3;
+d 节点位置不变
+
+继续遍历剩余 newChildren
+
+// 当前 oldFiber：b
+// 当前 newChildren：b
+
+key === b 在 oldFiber 中存在
+const oldIndex = b（之前）.index;
+oldIndex 1 < lastPlacedIndex 3 // 之前节点为 abcd，所以 b.index === 1
+则 b 节点需要向右移动
+===第二轮遍历结束===
+
+最终 acd 3 个节点都没有移动，b 节点被标记为移动
+```
+
+Demo02
+
+```
+// 之前
+abcd
+
+// 之后
+dabc
+
+===第一轮遍历开始===
+d（之后）vs a（之前）
+key改变，不能复用，跳出遍历
+===第一轮遍历结束===
+
+===第二轮遍历开始===
+newChildren === dabc，没用完，不需要执行删除旧节点
+oldFiber === abcd，没用完，不需要执行插入新节点
+
+将剩余oldFiber（abcd）保存为map
+
+继续遍历剩余newChildren
+
+// 当前oldFiber：abcd
+// 当前newChildren dabc
+
+key === d 在 oldFiber中存在
+const oldIndex = d（之前）.index;
+此时 oldIndex === 3; // 之前节点为 abcd，所以d.index === 3
+比较 oldIndex 与 lastPlacedIndex;
+oldIndex 3 > lastPlacedIndex 0
+则 lastPlacedIndex = 3;
+d节点位置不变
+
+继续遍历剩余newChildren
+
+// 当前oldFiber：abc
+// 当前newChildren abc
+
+key === a 在 oldFiber中存在
+const oldIndex = a（之前）.index; // 之前节点为 abcd，所以a.index === 0
+此时 oldIndex === 0;
+比较 oldIndex 与 lastPlacedIndex;
+oldIndex 0 < lastPlacedIndex 3
+则 a节点需要向右移动
+
+继续遍历剩余newChildren
+
+// 当前oldFiber：bc
+// 当前newChildren bc
+
+key === b 在 oldFiber中存在
+const oldIndex = b（之前）.index; // 之前节点为 abcd，所以b.index === 1
+此时 oldIndex === 1;
+比较 oldIndex 与 lastPlacedIndex;
+oldIndex 1 < lastPlacedIndex 3
+则 b节点需要向右移动
+
+继续遍历剩余newChildren
+
+// 当前oldFiber：c
+// 当前newChildren c
+
+key === c 在 oldFiber中存在
+const oldIndex = c（之前）.index; // 之前节点为 abcd，所以c.index === 2
+此时 oldIndex === 2;
+比较 oldIndex 与 lastPlacedIndex;
+oldIndex 2 < lastPlacedIndex 3
+则 c节点需要向右移动
+
+===第二轮遍历结束===
+```
+
+可以看到，我们以为从 `abcd` 变为 `dabc`，只需要将`d`移动到前面。
+
+但实际上 React 保持`d`不变，将`abc`分别移动到了`d`的后面。
+
+从这点可以看出，考虑性能，我们要尽量减少将节点从后面移动到前面的操作。
+
+### 5、状态更新
+
+#### 几个关键节点
+
+`render 阶段` 开始于 `performSyncWorkOnRoot` 或 `performConcurrentWorkOnRoot` 方法的调用。这取决于本次更新是同步更新还是异步更新。
+
+`commit 阶段` 开始于 `commitRoot` 方法的调用。其中 `rootFiber` 会作为传参。
+
+我们知道 `render 阶段` 完成后会进入 `commit 阶段`。我们继续补全从 `触发状态更新` 到 `render 阶段` 的路径。
+
+```shell
+触发状态更新（根据场景调用不同方法）
+	|
+	|
+	v
+
+	?
+
+	|
+	|
+	V
+
+	render 阶段(performSyncWorkOnRoot 或者 performConcurrentWorkOnRoot)
+
+  |
+  |
+  V
+
+  commit 阶段(commitRoot)
+```
+
+##### 创建 Update 对象
+
+在 `React` 中，有如下方法可以触发状态更新（排除 SSR 相关）
+
+- `ReactDOM.render`
+- `this.setState`
+- `this.forceUpdate`
+- `useState`
+- `useReducer`
+
+这些方法调用的场景各不相同，他们是如何接入同一套**状态更新机制**呢？
+
+答案是：每次 `状态更新` 都会创建一个保存**更新状态相关内容**的对象，我们叫他 `Update`。在 `render阶段` 的 `beginWork`中会根据 `Update` 计算新的 `state`。
+
+##### 从 fiber 到 root
+
+现在 `触发状态更新的fiber` 上已经包含 `Update` 对象。
+
+我们知道，`render阶段 `是从 `rootFiber` 开始向下遍历。那么如何从 `触发状态更新的fiber` 得到 `rootFiber` 呢？
+
+答案是：调用 `markUpdateLaneFromFiberToRoot` 方法。
+
+> 你可以从[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactFiberWorkLoop.new.js#L636)看到 `markUpdateLaneFromFiberToRoot` 的源码
+
+该方法做的工作可以概括为：从 `触发状态更新的fiber` 一直向上遍历到 `rootFiber`，并返回 `rootFiber`。
+
+由于不同更新优先级不尽相同，所以过程中还会更新遍历到的 `fiber` 的优先级。这对于我们当前属于超纲内容。
+
+##### 调度更新
+
+现在我们拥有一个 `rootFiber`，该 `rootFiber` 对应的 `Fiber树` 中某个 `Fiber节点` 包含一个 `Update`。
+
+接下来通知 `Scheduler` 根据**更新**的优先级，决定以**同步**还是**异步**的方式调度本次更新。
+
+这里调用的方法是 `ensureRootIsScheduled`。
+
+以下是 `ensureRootIsScheduled` 最核心的一段代码：
+
+```js
+if (newCallbackPriority === SyncLanePriority) {
+  // 任务已经过期，需要同步执行render阶段
+  newCallbackNode = scheduleSyncCallback(
+    performSyncWorkOnRoot.bind(null, root)
+  );
+} else {
+  // 根据任务优先级异步执行render阶段
+  var schedulerPriorityLevel =
+    lanePriorityToSchedulerPriority(newCallbackPriority);
+  newCallbackNode = scheduleCallback(
+    schedulerPriorityLevel,
+    performConcurrentWorkOnRoot.bind(null, root)
+  );
+}
+```
+
+你可以从[这里 (opens new window)](https://github.com/facebook/react/blob/b6df4417c79c11cfb44f965fab55b573882b1d54/packages/react-reconciler/src/ReactFiberWorkLoop.new.js#L602)看到 `ensureRootIsScheduled` 的源码
+
+其中，`scheduleCallback `和 `scheduleSyncCallback` 会调用 `Scheduler` 提供的调度方法根据 `优先级` 调度回调函数执行。
+
+可以看到，这里调度的回调函数为：
+
+```js
+performSyncWorkOnRoot.bind(null, root);
+performConcurrentWorkOnRoot.bind(null, root);
+```
+
+即 `render阶段` 的入口函数。
+
+至此，`状态更新 `就和我们所熟知的 `render阶段` 连接上了。
+
+##### 总结
+
+让我们梳理下 `状态更新` 的整个调用路径的关键节点：
+
+```sh
+触发状态更新（根据场景调用不同方法）
+	|
+	|
+	V
+
+创建Update对象
+	|
+	|
+	V
+
+从fiber到root（markUpdateLaneFromFiberToRoot）
+	|
+	|
+	V
+
+调度更新（ensureRootIsScheduled）
+	|
+	|
+	V
+
+render 阶段（performSyncWorkOnRoot 或者 performConcurrentWorkOnRoot）
+	|
+	|
+	V
+
+commit 阶段（commitRoot）
+
+```
+
+在 `React` 中，通过 `ReactDOM.createBlockingRoot` 和 `ReactDOM.createRoot` 创建的应用会采用`并发`的方式`更新状态`。
+
+`高优更新`（红色节点）中断正在进行中的 `低优更新`（蓝色节点），先完成 `render - commit流程`。
+
+待 `高优更新`完成后，`低优更新`基于`高优更新`的结果`重新更新`。
+
+接下来两节我们会从源码角度讲解这套`并发更新`是如何实现的。
+
+#### Update 对象
+
+触发更新的方法所隶属的组件分类：
+
+- ReactDOM.render —— HostRoot
+- this.setState —— ClassComponent
+- this.forceUpdate —— ClassComponent
+- useState —— FunctionComponent
+- useReducer —— FunctionComponent
+
+可以看到，一共三种组件（`HostRoot` | `ClassComponent` | `FunctionComponent`）可以触发更新。
+
+由于不同类型组件工作方式不同，所以存在两种不同结构的 `Update`，其中 `ClassComponent` 与 `HostRoot` 共用一套 `Update` 结构，`FunctionComponent` 单独使用一种 `Update` 结构。
+
+虽然他们的结构不同，但是他们工作机制与工作流程大体相同。在本节我们介绍前一种 `Update`，`FunctionComponent`对应的 `Update` 在 `Hooks` 章节介绍。
+
+##### Update 的结构
+
+`ClassComponent` 与 `HostRoot`（即 `rootFiber.tag` 对应类型）共用同一种 `Update结构`。
+
+对应的结构如下：
+
+```js
+const update: Update<*> = {
+  eventTime,
+  lane,
+  suspenseConfig,
+  tag: UpdateState,
+  payload: null,
+  callback: null,
+
+  next: null,
+};
+```
+
+> `Update` 由 `createUpdate` 方法返回，你可以从[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactUpdateQueue.old.js#L189)看到`createUpdate`的源码
+
+字段意义如下：
+
+- eventTime：任务时间，通过`performance.now()`获取的毫秒数。由于该字段在未来会重构，当前我们不需要理解他。
+- lane：优先级相关字段。当前还不需要掌握他，只需要知道不同`Update`优先级可能是不同的。
+
+> 你可以将`lane`类比`心智模型`中`需求的紧急程度`。
+
+- suspenseConfig：`Suspense`相关，暂不关注。
+- tag：更新的类型，包括`UpdateState` | `ReplaceState` | `ForceUpdate` | `CaptureUpdate`。
+- payload：更新挂载的数据，不同类型组件挂载的数据不同。对于`ClassComponent`，`payload`为`this.setState`的第一个传参。对于`HostRoot`，`payload`为`ReactDOM.render`的第一个传参。
+- callback：更新的回调函数。即在[commit 阶段的 layout 子阶段一节](https://react.iamkasong.com/renderer/layout.html#commitlayouteffectonfiber)中提到的`回调函数`。
+- next：与其他`Update`连接形成链表。
+
+##### update 与 fiber 的联系
+
+我们发现，`Update` 存在一个连接其他 `Update` 形成链表的字段 `next`。联系 `React` 中另一种以链表形式组成的结构`Fiber`，他们之间有什么关联么？
+
+答案是肯定的。
+
+##### updateQueue
+
+`updateQueue ` 有三种类型，其中针对 `HostComponent` 的类型我们在[completeWork 一节](https://react.iamkasong.com/process/completeWork.html#update时)介绍过。
+
+剩下两种类型和 `Update` 的两种类型对应。
+
+`ClassComponent `与 `HostRoot` 使用的 `UpdateQueue` 结构如下：
+
+```js
+const queue: UpdateQueue<State> = {
+  baseState: fiber.memoizedState,
+  firstBaseUpdate: null,
+  lastBaseUpdate: null,
+  shared: {
+    pending: null,
+  },
+  effects: null,
+};
+```
+
+`UpdateQueue ` 由 `initializeUpdateQueue` 方法返回，你可以从[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactUpdateQueue.new.js#L157)看到 `initializeUpdateQueue`的源码。
+
+字段说明如下：
+
+- baseState：本次更新前该 `Fiber节点` 的 `state`，`Update ` 基于该 `state ` 计算更新后的`state`。
+
+你可以将`baseState`类比`心智模型`中的`master分支`。
+
+- `firstBaseUpdate`与`lastBaseUpdate`：本次更新前该`Fiber节点`已保存的`Update`。以链表形式存在，链表头为`firstBaseUpdate`，链表尾为`lastBaseUpdate`。之所以在更新产生前该`Fiber节点`内就存在`Update`，是由于某些`Update`优先级较低所以在上次`render阶段`由`Update`计算`state`时被跳过。
+
+> 你可以将`baseUpdate`类比`心智模型`中执行`git rebase`基于的`commit`（节点 D）。
+
+- `shared.pending`：触发更新时，产生的`Update`会保存在`shared.pending`中形成单向环状链表。当由`Update`计算`state`时这个环会被剪开并连接在`lastBaseUpdate`后面。
+
+> 你可以将`shared.pending`类比`心智模型`中本次需要提交的`commit`（节点 ABC）。
+
+- effects：数组。保存 `update.callback !== null` 的 `Update`。
+
+##### 例子
+
+> `render阶段 `的 `Update操作` 由 `processUpdateQueue` 完成，你可以从[这里 (opens new window)](https://github.com/facebook/react/blob/1fb18e22ae66fdb1dc127347e169e73948778e5a/packages/react-reconciler/src/ReactUpdateQueue.new.js#L405)看到 `processUpdateQueue` 的源码
+
+`state` 的变化在 `render阶段` 产生与上次更新不同的 `JSX` 对象，通过 `Diff算法` 产生 `effectTag`，在 `commit阶段`渲染在页面上。
+
+渲染完成后 `workInProgress Fiber树` 变为 `current Fiber树`，整个更新流程结束。
 
 ## 参考
 
